@@ -1,0 +1,15 @@
+# Local working notes and the local board. Deliberately untracked: the resume
+# notebook and the dashboard are for this machine, and CHANGELOG.md is the
+# record that survives. Keep it that way.
+docs/CONTEXT.md
+docs/status.html
+
+# Never in the tree, per CLAUDE.md's hygiene rules.
+*.pem
+*.key
+*.pfx
+*.p12
+lab-evidence/
+
+# Built binary
+/spiffe-ad-broker
