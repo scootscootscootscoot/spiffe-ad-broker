@@ -73,7 +73,11 @@ and revocation infrastructure — are outside any composer's reach. The composer
 ## Layout
 
 ```
-cmd/spiffe-ad-broker/        entrypoint (nothing wired up yet)
+cmd/spiffe-ad-broker/        entrypoint: flags, wiring, graceful shutdown
+internal/broker/             the authenticate-and-map path + refusal taxonomy;
+                             transport-independent, so the transport stays swappable
+internal/transport/httpapi/  HTTP over mTLS: POST /issue, peer-cert identity extraction
+internal/tlsconf/            mTLS config from files, reloaded when the SVID or bundle rotates
 internal/issuer/             the backend contract — Request, Credential, Issuer
 internal/issuer/adcs/        shape C: enrollment agent against ADCS
 internal/issuer/subordinate/ shape B: broker-controlled subordinate CA
@@ -81,6 +85,10 @@ internal/mapping/            SPIFFE ID → AD SID snapshot contract + validation
 internal/encoding/           DER builders (CDP, AD SID ext) + golden/fuzz tests
 docs/DESIGN.md               the architecture and the evidence behind it
 ```
+
+Nothing under `internal/broker` may import a transport package, and nothing in a
+transport may re-implement a check the broker makes. That boundary is what keeps the
+security properties testable without standing up a server.
 
 `internal/mapping` and `internal/encoding` were **copied** from the composer repo, by
 owner decision, over extracting a shared module. They will drift; that was the accepted
@@ -94,6 +102,10 @@ trade for moving fast. If they start mattering in both places, extract then.
 | 2026-08-17 | Build the broker instead. One codebase, two issuance backends behind one interface — B (own subordinate CA) and C (ADCS enrollment agent) differ only in where the certificate comes from. |
 | 2026-08-17 | Named `spiffe-ad-broker`. New repo; `internal/mapping` and `internal/encoding` copied rather than extracted into a shared module. |
 | 2026-08-17 | Workload generates its own key and sends a CSR. The broker never handles workload private keys, and trusts nothing in the CSR but the public key and its PoP signature. |
+| 2026-08-17 | **Transport: HTTP over mTLS, standard library only.** One operation, no streaming, so gRPC buys nothing here and costs a protobuf/gRPC dependency tree inside a credential-minting process — the module's zero dependencies are an auditability property, not minimalism. Authentication is identical either way (gRPC credentials wrap the same `crypto/tls` handshake). Reversible by construction: `internal/broker` knows nothing about HTTP, so a gRPC transport would be a second thin adapter, not a rewrite. |
+| 2026-08-17 | **Refusals are classified, not stringly-typed.** `broker.Reason` is the taxonomy; a transport maps it to its own status vocabulary. Adding a failure mode means choosing a Reason for it — a refusal nobody classified is a refusal nobody thought about. |
+| 2026-08-17 | **Refusals are logged once, where they are raised.** `Broker.Issue` logs with caller and snapshot version attached; transports translate and must not re-report. |
+| 2026-08-17 | **TLS material reloads from disk; a failed reload keeps last-known-good.** Same call as the mapping snapshot's staleness policy: a half-written file from a rotation tool must not take issuance down. A *successful* reload always takes effect, so de-trusting a CA still works. |
 
 ## Verify
 
