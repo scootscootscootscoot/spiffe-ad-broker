@@ -1,0 +1,11 @@
+<s:Envelope xmlns:a="http://www.w3.org/2005/08/addressing" xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header><a:Action s:mustUnderstand="1">http://schemas.microsoft.com/windows/pki/2009/01/enrollment/RST/wstep</a:Action><a:MessageID>urn:uuid:0c6196cd-5b25-4af5-9672-05dcf4f8c3cd</a:MessageID><a:To s:mustUnderstand="1">https://recorder.pkinitlab.internal:8443/service.svc/CES</a:To></s:Header><s:Body><RequestSecurityToken PreferredLanguage="en-US" xmlns="http://docs.oasis-open.org/ws-sx/ws-trust/200512"><TokenType>http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3</TokenType><RequestType>http://docs.oasis-open.org/ws-sx/ws-trust/200512/Issue</RequestType><BinarySecurityToken ValueType="http://schemas.microsoft.com/windows/pki/2009/01/enrollment#PKCS10" EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#base64binary" a:Id="" xmlns:a="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd" xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">MIICXzCCAUcCAQAwGjEYMBYGA1UEAwwPaWdub3JlZC1ieS1hZGNzMIIBIjANBgkqhkiG9w0BAQEF&#xD;
+AAOCAQ8AMIIBCgKCAQEA1vPuaAzKCTzlaHHTLZnXwBT2AGcKbON3Vof7tO9Z7eXI37bX9kNO55cj&#xD;
+UWYrQNlc23jf0fjvOdjzz/nNOGTXaFPgf3TDOK/c9vEFmVcVXPmYZVguFkHusXVUA9HAIVpMerGI&#xD;
+1R1gRXIHHYfbBmL6ao0q3MtD30lyrde4eS1cTwY1Q0Qn5HIgF9Cu8pYOZQkG1lQxwOVsB5NqnbHQ&#xD;
+wjR42ockp4Y8XSTjqo4g6bHhoTSjXCZIXFwzXuESPzIoiIgIhpWOmkR/lQyXDnLClBBmobNOvNKi&#xD;
+EcXlGnSBzcNYOuaHDTEe6xNla7GsVFvfhNGLU9+9FbBMQT2qVvxae8f4QQIDAQABoAAwDQYJKoZI&#xD;
+hvcNAQELBQADggEBAE6739UK8w8u3LVW6H7C1C9VERkRwyiXYzHw5OTYSSjunyePWHTcA55DfuqM&#xD;
+6CMLCKha4XOEyx1iGSUs1UfJcIwTdF0hlvkO8j2lZtNorj0+K5fItv1EVWSWQdC5aeOik2a+oiz9&#xD;
+Qdpnge0ZewkJw7x/tJ9+dPeejOWNYBpSgp9v5V2S1QzZ6hdjl5jPPq1cQMJRh69jrl7689+Z7EMf&#xD;
+GB8t5jcFEqEMhhmG1Upa8BQpNQegfIw0vQf+38k6dvPbEFGvABU4+ST8v+3yklyd4ucg6NM5HowY&#xD;
+ioPXv5ygD4/y/rjrtpVDcpox7gR9K0K3g3SLiaElSQxjXpoBZWH8ODQ=</BinarySecurityToken><AdditionalContext xmlns="http://schemas.xmlsoap.org/ws/2006/12/authorization"><ContextItem Name="CertificateTemplate"><Value>User</Value></ContextItem><ContextItem Name="ccm"><Value>dc01.pkinitlab.internal</Value></ContextItem></AdditionalContext></RequestSecurityToken></s:Body></s:Envelope>

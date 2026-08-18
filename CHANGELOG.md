@@ -22,6 +22,26 @@ release. Nothing has been released yet, so everything sits under Unreleased.
 - `internal/encoding/testdata/` — the ADCS-issued fixture certificate and the extracted
   extension, with their provenance recorded. Synthetic: a throwaway account in a
   disposable lab forest.
+- `internal/issuer/adcs/wstep.go` — the MS-WSTEP layer: builds the
+  `RequestSecurityToken` that carries a PKCS#10 to a CES endpoint, and parses the
+  `RequestSecurityTokenResponseCollection` back into a leaf certificate and its chain,
+  including a hand-written certificates-only PKCS#7 reader (the standard library has no
+  PKCS#7 and this module takes no dependencies). It fails closed: a SOAP fault, an
+  unexpected action, a missing or mistyped token, or a certificate that does not parse
+  is an error, never a partial credential.
+- `internal/issuer/adcs/testdata/` — two real wire captures, with provenance recorded. A
+  `RequestSecurityToken` sent by Microsoft's own client, and a successful ADCS response.
+  Synthetic lab forest, no key material.
+- `docs/findings/2026-08-17-wstep-request-body.md` — the MS-WSTEP `EncodingType` ADCS
+  accepts is **not** the one WS-Security documents. It is the `wssecurity-secext` schema
+  URI with a lowercase `#base64binary` fragment; the documented
+  `soap-message-security-1.0#Base64Binary` is refused with `The EncodingType is
+  invalid.`, as is every other documented spelling. Captured by pointing `certreq` at a
+  recording endpoint holding a CA-issued TLS certificate, which is also how the response
+  shape was pinned. With the one constant corrected, a stdlib-only Go client submits a
+  PKCS#10 to a live CES endpoint and gets an issued certificate back, so the `adcs`
+  transport is proven end to end.
+
 - `docs/findings/2026-08-17-adcs-request-path.md` — the `adcs` backend speaks CMC/WSTEP
   over the CES/CEP HTTP endpoints, authenticated with a client certificate, and a
   zero-dependency Go client reaches it. Records the two `http.sys` settings
@@ -30,6 +50,12 @@ release. Nothing has been released yet, so everything sits under Unreleased.
   unusable from Go.
 
 ### Changed
+
+- `internal/issuer/adcs` no longer describes the request path as undecided. `Issue` still
+  refuses, but for a narrower reason: the transport is built and proven, and what is
+  missing is authorization — the enrollment-agent credential and the CMC signed-request
+  shape that enrols *on behalf of* the target account. Everything proven so far enrols
+  the broker as itself.
 
 - `internal/encoding` docs no longer describe the SID extension's encoding as an open
   question. It is settled: the extension carries the SID as its textual `S-1-…`

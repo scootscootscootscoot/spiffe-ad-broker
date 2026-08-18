@@ -37,10 +37,14 @@ func (i *Issuer) Name() string { return "adcs" }
 
 // Issue is not implemented yet.
 //
-// Building it needs, in order: the MS-WCCE request path (or certreq/CMC
-// equivalent), an enrollment-agent credential to sign on-behalf-of
-// requests, and a certificate template configured for the target accounts.
-// None of those are decided, so this refuses rather than approximating.
+// The request path is settled and built: MS-WSTEP over the CES HTTPS
+// endpoint, in wstep.go, pinned to real captures in testdata/. What is still
+// missing is authorization, not transport — an enrollment-agent credential
+// and the CMC signed-request shape that uses it to enrol *on behalf of* the
+// target account, plus a certificate template configured for those accounts.
+//
+// Until those exist this backend can only enrol as itself, which is not what
+// the broker is for, so it refuses rather than approximating.
 func (i *Issuer) Issue(_ context.Context, req issuer.Request) (*issuer.Credential, error) {
 	if err := req.Validate(); err != nil {
 		return nil, err
