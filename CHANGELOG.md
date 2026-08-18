@@ -9,6 +9,34 @@ release. Nothing has been released yet, so everything sits under Unreleased.
 
 ### Added
 
+- `encoding.BuildNTDSCASecurityExt` — the AD SID security extension
+  (`szOID_NTDS_CA_SECURITY_EXT`), pinned byte for byte to a fixture taken from a
+  certificate a real ADCS Enterprise CA issued. This was the one item on the board that
+  was blocked, inherited unsolved from the predecessor; standing up ADCS for the
+  request-path work produced the fixture. See
+  `docs/findings/2026-08-17-ad-sid-extension-encoding.md`.
+- `encoding.SIDFromCertificateExtensions` — reads the SID back out of an issued
+  certificate, so a backend that delegates issuance can check that what came back names
+  the account that was asked for. Delegating issuance is not the same as delegating the
+  security decision.
+- `internal/encoding/testdata/` — the ADCS-issued fixture certificate and the extracted
+  extension, with their provenance recorded. Synthetic: a throwaway account in a
+  disposable lab forest.
+- `docs/findings/2026-08-17-adcs-request-path.md` — the `adcs` backend speaks CMC/WSTEP
+  over the CES/CEP HTTP endpoints, authenticated with a client certificate, and a
+  zero-dependency Go client reaches it. Records the two `http.sys` settings
+  (`clientcertnegotiation`, `dsmapperusage`) that the backend will have to document as
+  deployment prerequisites, because without them the endpoint works from curl and is
+  unusable from Go.
+
+### Changed
+
+- `internal/encoding` docs no longer describe the SID extension's encoding as an open
+  question. It is settled: the extension carries the SID as its textual `S-1-…`
+  rendering, **not** the MS-DTYP binary layout `MarshalSID` produces. `MarshalSID` keeps
+  its role as the canonical `objectSid` representation and as the validator that a SID
+  parses before it can reach a certificate.
+
 - `internal/broker` — the authenticate-and-map path, and the only place issuance
   decisions are made. Takes a SPIFFE ID the transport has already proven and a DER
   PKCS#10 request; returns a credential or a classified refusal. It knows nothing about

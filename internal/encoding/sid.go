@@ -31,13 +31,13 @@ const (
 // MarshalSID encodes a canonical SID string ("S-1-5-21-…-1105") into its
 // MS-DTYP binary form.
 //
-// Note on scope: whether the AD SID security extension carries the SID in
-// this binary form or as its string rendering is NOT settled, and must not
-// be guessed — it is one of the specific questions the ADCS fixture answers
-// (see docs/FIXTURES.md). This codec is the canonical SID representation in
+// Note on scope: this is NOT the form the AD SID security extension carries.
+// That was an open question until the ADCS fixture settled it on 2026-08-17
+// — the extension uses the textual S-1-… rendering instead (see
+// BuildNTDSCASecurityExt). This codec is the canonical SID representation in
 // its own right: it is what AD stores in the objectSid attribute, so the
-// mapping-snapshot producer will need it regardless of how the extension
-// turns out to be encoded.
+// mapping-snapshot producer needs it, and it is what validates that a SID
+// parses at all before one reaches a certificate.
 func MarshalSID(s string) ([]byte, error) {
 	authority, subAuthorities, err := parseSID(s)
 	if err != nil {

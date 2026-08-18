@@ -19,13 +19,24 @@
 //     Its encoding must NOT be inferred from documentation, from the OID,
 //     or from a description of the structure. The bytes must come from a
 //     real ADCS-issued certificate or an authoritative Microsoft test
-//     vector, and a golden test must pin them. Until that fixture exists,
-//     the extension builder stays unimplemented — see docs/FIXTURES.md for
-//     how to obtain one.
+//     vector, and a golden test must pin them.
 //
-// The SID codec in this package is the primitive underneath that extension
-// (the binary SID layout from MS-DTYP), not the extension itself. It is
-// verifiable on its own terms and does not depend on the pending fixture.
+//     That fixture now exists. It was captured on 2026-08-17 from a
+//     certificate issued by an ADCS Enterprise CA in the phase-4 lab; see
+//     testdata/README.md for its provenance and what it settles.
+//     BuildNTDSCASecurityExt is pinned to it byte for byte.
+//
+// The fixture answered a question this package had deliberately left open:
+// the extension carries the SID as its *textual* S-1-… rendering, not as
+// the MS-DTYP binary layout. Guessing the other way would have produced a
+// well-formed extension naming the wrong account, which is precisely the
+// failure the no-inferred-encodings rule exists to prevent.
+//
+// The SID codec in this package is therefore not the extension's payload
+// format. It remains the canonical binary SID representation in its own
+// right — it is what AD stores in objectSid — so the mapping-snapshot
+// producer still needs it, and BuildNTDSCASecurityExt uses it to validate
+// that a SID parses before letting it into a certificate.
 package encoding
 
 import "encoding/asn1"

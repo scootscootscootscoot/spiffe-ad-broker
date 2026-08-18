@@ -11,5 +11,13 @@ docs/status.html
 *.p12
 lab-evidence/
 
+# Exception, and it must stay a narrow one: the golden fixture for the AD SID
+# security extension. Its whole value is that the bytes come from a real
+# ADCS-issued certificate, so the certificate has to be tracked or the pin
+# means nothing. It is a public certificate from a synthetic, disposable lab
+# forest, with no key material and no real-forest data. Nothing else under
+# testdata/ is exempt.
+!internal/encoding/testdata/adcs-user-cert.pem
+
 # Built binary
 /spiffe-ad-broker
