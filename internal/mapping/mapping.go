@@ -52,6 +52,29 @@ type Entry struct {
 	// ("S-1-5-21-...-1105"). Validated with ValidateSIDString before use;
 	// never derived from the SPIFFE ID.
 	ADSID string `json:"ad_sid"`
+	// ADAccount is the same account in DOMAIN\samAccountName form.
+	//
+	// Optional, because only one backend needs it: `subordinate` issues the
+	// SID extension itself and never names the account any other way, while
+	// `adcs` asks an enrollment agent to enrol *for* the account, and that
+	// request names it by name. A backend that needs it and does not have it
+	// refuses — it is not derived from the SID, and it is not looked up.
+	ADAccount string `json:"ad_account,omitempty"`
+}
+
+// Account is one target AD account, as the authoritative snapshot names it.
+//
+// Both fields identify the same account by different means, and both come
+// from the snapshot. Neither is computed from the other: resolving a SID to a
+// name (or back) would put a directory lookup on the issuance path and make
+// the answer depend on something other than the authoritative mapping.
+type Account struct {
+	// SID is the canonical string form, always present.
+	SID string
+
+	// Name is DOMAIN\samAccountName, or empty if the snapshot does not
+	// carry one for this entry.
+	Name string
 }
 
 // Registry is an immutable, fully validated view of one snapshot. Every
@@ -60,7 +83,7 @@ type Entry struct {
 type Registry struct {
 	version     string
 	generatedAt time.Time
-	entries     map[string]string
+	entries     map[string]Account
 }
 
 // Load reads and validates the snapshot at path. Any failure — unreadable
@@ -111,7 +134,7 @@ func Parse(data []byte) (*Registry, error) {
 		return nil, errors.New("entries is empty")
 	}
 
-	entries := make(map[string]string, len(snapshot.Entries))
+	entries := make(map[string]Account, len(snapshot.Entries))
 	for i, entry := range snapshot.Entries {
 		if err := ValidateSPIFFEID(entry.SPIFFEID); err != nil {
 			return nil, fmt.Errorf("entries[%d]: %w", i, err)
@@ -119,14 +142,23 @@ func Parse(data []byte) (*Registry, error) {
 		if err := ValidateSIDString(entry.ADSID); err != nil {
 			return nil, fmt.Errorf("entries[%d]: %w", i, err)
 		}
+		// Absent is allowed; present and malformed is not. A snapshot that
+		// carries a name at all has made a claim about which account this
+		// workload authenticates as, and a claim that does not parse must
+		// stop the whole snapshot loading rather than be dropped.
+		if entry.ADAccount != "" {
+			if err := ValidateAccountName(entry.ADAccount); err != nil {
+				return nil, fmt.Errorf("entries[%d]: %w", i, err)
+			}
+		}
 		if existing, dup := entries[entry.SPIFFEID]; dup {
 			// Rejected even when both entries carry the same SID: a
 			// duplicate key means the producer merged sources badly, and
 			// last-write-wins would decide which AD account a workload
 			// authenticates as.
-			return nil, fmt.Errorf("entries[%d]: duplicate spiffe_id %q (already mapped to %s)", i, entry.SPIFFEID, existing)
+			return nil, fmt.Errorf("entries[%d]: duplicate spiffe_id %q (already mapped to %s)", i, entry.SPIFFEID, existing.SID)
 		}
-		entries[entry.SPIFFEID] = entry.ADSID
+		entries[entry.SPIFFEID] = Account{SID: entry.ADSID, Name: entry.ADAccount}
 	}
 
 	return &Registry{
@@ -136,14 +168,15 @@ func Parse(data []byte) (*Registry, error) {
 	}, nil
 }
 
-// Lookup returns the AD SID mapped to spiffeID. A miss returns ErrNoMapping;
-// there is no default, no wildcard, and no derivation from the ID itself.
-func (r *Registry) Lookup(spiffeID string) (string, error) {
-	sid, ok := r.entries[spiffeID]
+// Lookup returns the AD account mapped to spiffeID. A miss returns
+// ErrNoMapping; there is no default, no wildcard, and no derivation from the
+// ID itself.
+func (r *Registry) Lookup(spiffeID string) (Account, error) {
+	account, ok := r.entries[spiffeID]
 	if !ok {
-		return "", fmt.Errorf("%w: %s (snapshot version %s)", ErrNoMapping, spiffeID, r.version)
+		return Account{}, fmt.Errorf("%w: %s (snapshot version %s)", ErrNoMapping, spiffeID, r.version)
 	}
-	return sid, nil
+	return account, nil
 }
 
 // Version is the snapshot's content revision, for issuance decision logs.

@@ -35,12 +35,12 @@ func TestParseValid(t *testing.T) {
 		t.Errorf("GeneratedAt() = %s, want %s", r.GeneratedAt(), want)
 	}
 
-	sid, err := r.Lookup("spiffe://example.org/svc/db/reporting")
+	account, err := r.Lookup("spiffe://example.org/svc/db/reporting")
 	if err != nil {
 		t.Fatalf("Lookup() = %v, want nil", err)
 	}
-	if want := "S-1-5-21-1111111111-2222222222-3333333333-1105"; sid != want {
-		t.Errorf("Lookup() = %q, want %q", sid, want)
+	if want := "S-1-5-21-1111111111-2222222222-3333333333-1105"; account.SID != want {
+		t.Errorf("Lookup().SID = %q, want %q", account.SID, want)
 	}
 }
 
@@ -154,12 +154,12 @@ func TestLookupMissFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() = %v", err)
 	}
-	sid, err := r.Lookup("spiffe://example.org/svc/not/mapped")
+	account, err := r.Lookup("spiffe://example.org/svc/not/mapped")
 	if !errors.Is(err, ErrNoMapping) {
 		t.Errorf("Lookup(unmapped) error = %v, want ErrNoMapping", err)
 	}
-	if sid != "" {
-		t.Errorf("Lookup(unmapped) = %q, want empty string", sid)
+	if account != (Account{}) {
+		t.Errorf("Lookup(unmapped) = %+v, want the zero Account", account)
 	}
 }
 
@@ -261,12 +261,17 @@ func FuzzParse(f *testing.F) {
 		if r.Len() == 0 {
 			t.Fatal("Parse() accepted a snapshot with no entries")
 		}
-		for id, sid := range r.entries {
+		for id, account := range r.entries {
 			if err := ValidateSPIFFEID(id); err != nil {
 				t.Fatalf("Registry holds invalid SPIFFE ID %q: %v", id, err)
 			}
-			if err := ValidateSIDString(sid); err != nil {
-				t.Fatalf("Registry holds invalid SID %q: %v", sid, err)
+			if err := ValidateSIDString(account.SID); err != nil {
+				t.Fatalf("Registry holds invalid SID %q: %v", account.SID, err)
+			}
+			if account.Name != "" {
+				if err := ValidateAccountName(account.Name); err != nil {
+					t.Fatalf("Registry holds invalid account name %q: %v", account.Name, err)
+				}
 			}
 		}
 	})

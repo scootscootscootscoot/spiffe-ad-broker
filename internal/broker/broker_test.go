@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer"
-	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/adcs"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/subordinate"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/mapping"
 )
 
@@ -125,7 +125,7 @@ func wantRefusal(t *testing.T, err error, reason Reason) *Error {
 }
 
 func TestNewRejectsMissingDependencies(t *testing.T) {
-	if _, err := New(Config{Backend: adcs.New()}); err == nil {
+	if _, err := New(Config{Backend: subordinate.New()}); err == nil {
 		t.Error("accepted a config with no registry")
 	}
 	if _, err := New(Config{Registry: snapshot(t, time.Now())}); err == nil {
@@ -139,7 +139,7 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 func TestNewRefusesFutureDatedSnapshot(t *testing.T) {
 	_, err := New(Config{
 		Registry: snapshot(t, time.Now().Add(2*time.Hour)),
-		Backend:  adcs.New(),
+		Backend:  subordinate.New(),
 		Logger:   slog.New(slog.DiscardHandler),
 	})
 	if err == nil {
@@ -261,7 +261,7 @@ func TestBackendReceivesProvenIdentityAndMappedSID(t *testing.T) {
 // never as an internal error and never as anything a caller could read as
 // "try another way".
 func TestUnimplementedBackendSurfacesAsNotImplemented(t *testing.T) {
-	b := newBroker(t, adcs.New(), nil)
+	b := newBroker(t, subordinate.New(), nil)
 	err := mustIssue(t, b, mappedCaller, newCSR(t))
 	bErr := wantRefusal(t, err, ReasonNotImplemented)
 	if !errors.Is(bErr, issuer.ErrNotImplemented) {

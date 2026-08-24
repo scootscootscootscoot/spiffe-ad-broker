@@ -8,8 +8,10 @@ obtain an AD-usable credential, so it can get a Kerberos TGT and reach AD-integr
 services as a real AD account — without the workload holding a long-lived AD secret, and
 without a per-issuance `altSecurityIdentities` write.
 
-> **Status: early. Nothing is wired up yet.** The interface, the security model, and the
-> architecture are settled and documented; both issuance backends are stubs that refuse.
+> **Status: early, but it issues.** The `adcs` backend obtains a real certificate for the
+> mapped AD account from a live ADCS CA — proven end to end against Windows Server 2025 —
+> and refuses anything that comes back naming a different account. `subordinate` is still
+> a stub that refuses. Nothing here has been run outside a lab.
 
 ## It is not a SPIRE plugin
 
@@ -22,7 +24,7 @@ standalone service beside SPIRE. In PKI terms it is a registration authority.
 ```
 workload ──SVID over mTLS──▶ broker ──▶ issuer backend ──▶ AD-auth certificate
                                │
-                               └──▶ mapping snapshot (SPIFFE ID → AD SID)
+                               └──▶ mapping snapshot (SPIFFE ID → AD account)
 ```
 
 1. Authenticate the caller by its SVID. The SPIFFE ID comes from the verified peer
@@ -35,8 +37,11 @@ workload ──SVID over mTLS──▶ broker ──▶ issuer backend ──▶
 Two backends, differing only in step 3:
 
 - **`adcs`** — the broker acts as an ADCS enrollment agent and requests on behalf of the
-  target account. Preferred: ADCS is already in `NTAuthCertificates`, already emits the
-  AD SID security extension, and already runs CRL infrastructure.
+  target account: the workload's CSR goes, unread, into a CMC naming that account, signed
+  by the agent credential. Preferred, because ADCS is already in `NTAuthCertificates`,
+  already emits the AD SID security extension, and already runs CRL infrastructure.
+  Whatever comes back is checked against the SID the mapping asked for — a CA that
+  ignores the requested account does not fail, it issues for the wrong one.
 - **`subordinate`** — the broker issues from a dedicated CA it controls, subordinate to
   the corporate PKI. For when the issuance path must be owned rather than delegated.
 

@@ -56,6 +56,12 @@ and revocation infrastructure — are outside any composer's reach. The composer
   ADCS-issued certificate or an authoritative Microsoft vector, pinned by a golden test.
   Never from documentation, never from the OID. (Only the `subordinate` backend needs
   this; `adcs` gets it from ADCS.)
+- **Verify what an external CA returns; never assume it honoured the request.** Under
+  the `adcs` backend the target account is *asked for*, by name, inside the enrollment
+  agent's signature. When the CA does not honour that ask — wrong agent rights, wrong
+  template, misencoded name — it does not refuse: it issues a valid, correctly chained
+  certificate for the *caller's own* account. Every issued certificate is read back and
+  refused unless its AD SID extension names the SID the mapping asked for.
 - **Treat any CA this broker relies on as forest-wide.** A CA in NTAuth is a
   forest-wide client-authentication authority; AD has no per-CA account scoping, and
   name constraints do not govern the SID extension. Keeping an issuing CA
@@ -106,6 +112,10 @@ trade for moving fast. If they start mattering in both places, extract then.
 | 2026-08-17 | **Refusals are classified, not stringly-typed.** `broker.Reason` is the taxonomy; a transport maps it to its own status vocabulary. Adding a failure mode means choosing a Reason for it — a refusal nobody classified is a refusal nobody thought about. |
 | 2026-08-17 | **Refusals are logged once, where they are raised.** `Broker.Issue` logs with caller and snapshot version attached; transports translate and must not re-report. |
 | 2026-08-17 | **TLS material reloads from disk; a failed reload keeps last-known-good.** Same call as the mapping snapshot's staleness policy: a half-written file from a rotation tool must not take issuance down. A *successful* reload always takes effect, so de-trusting a CA still works. |
+| 2026-08-24 | **The `adcs` backend issues, by CMC enrol-on-behalf-of.** The workload's PKCS#10 goes verbatim into a CMC naming the mapped account in the `regInfo` control, signed by an enrollment agent credential. ADCS accepts a CMC signed by the agent alone, which is what makes the shape possible at all — the broker never holds the workload's key and so can never produce the second signature `certreq` adds. Pinned byte for byte to a capture. |
+| 2026-08-24 | **The mapping snapshot carries the account *name* as well as the SID** (`ad_account`, optional). An enrollment agent names its target by `DOMAIN\samAccountName`; the SID is what comes back. Resolving one to the other would put a directory lookup on the issuance path and move the decision out of the authoritative snapshot, so both come from the snapshot and neither is derived. `subordinate` needs only the SID; `adcs` refuses without the name. |
+| 2026-08-24 | **The account name's character set is pinned narrowly** — `[A-Za-z0-9._$-]` plus one separator — in both `internal/mapping` and the CMC builder. Only the backslash's escaping (`%5C`) was established by capture; `&`, `=` and `%` are refused because unescaped each could restate the authorization inside the `regInfo` string. Widening it means establishing an escaping, not assuming one. |
+| 2026-08-24 | **The `adcs` backend needs two AD-facing credentials and they are not interchangeable.** The enrollment agent certificate carries the Certificate Request Agent application policy and not Client Authentication, so it cannot authenticate the TLS connection to a CES endpoint configured for certificate auth. That is a second certificate, mapping to an AD account — the broker has an AD identity of its own. |
 
 ## Verify
 

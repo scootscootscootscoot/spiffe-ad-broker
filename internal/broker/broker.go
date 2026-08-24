@@ -157,12 +157,15 @@ func (b *Broker) Issue(ctx context.Context, callerID string, csrDER []byte) (*is
 	b.warnIfStale(ctx, log)
 
 	// Before the CSR is even looked at. See the package comment.
-	sid, err := b.registry.Lookup(callerID)
+	account, err := b.registry.Lookup(callerID)
 	if err != nil {
 		return nil, b.refused(ctx, log, refuse(ReasonNoMapping, err,
 			"no mapping entry for caller"))
 	}
-	log = log.With(slog.String("ad_sid", sid))
+	log = log.With(slog.String("ad_sid", account.SID))
+	if account.Name != "" {
+		log = log.With(slog.String("ad_account", account.Name))
+	}
 
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
@@ -174,7 +177,7 @@ func (b *Broker) Issue(ctx context.Context, callerID string, csrDER []byte) (*is
 	// CSR is workload-controlled, the SPIFFE ID was proven by mTLS, and the
 	// SID came from the snapshot. Validate is the one place that guards all
 	// of them, and it runs before any backend sees the request.
-	req := issuer.Request{CSR: csr, SPIFFEID: callerID, ADSID: sid}
+	req := issuer.Request{CSR: csr, SPIFFEID: callerID, ADSID: account.SID, ADAccount: account.Name}
 	if err := req.Validate(); err != nil {
 		return nil, b.refused(ctx, log, refuse(ReasonInvalidRequest, err,
 			"request failed validation"))

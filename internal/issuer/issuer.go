@@ -63,6 +63,15 @@ type Request struct {
 	// ADSID is the target account's SID in canonical string form
 	// ("S-1-5-21-...-1105"), resolved from the mapping snapshot.
 	ADSID string
+
+	// ADAccount is the same account in DOMAIN\samAccountName form, also
+	// from the mapping snapshot and never from anywhere else.
+	//
+	// It is empty unless the snapshot carries one. Only the adcs backend
+	// needs it — an enrollment agent names the target account by name, so
+	// under that backend this field *is* the authorization statement the CA
+	// acts on, and the SID is what has to be checked on the way back.
+	ADAccount string
 }
 
 // Validate checks everything that must hold before any backend is called.
@@ -86,6 +95,14 @@ func (r Request) Validate() error {
 	}
 	if err := mapping.ValidateSIDString(r.ADSID); err != nil {
 		return fmt.Errorf("target AD SID: %w", err)
+	}
+	// Absent is a backend's problem — subordinate never needs it. Present
+	// and malformed is everyone's, so it is refused here rather than at
+	// whichever backend happens to read it.
+	if r.ADAccount != "" {
+		if err := mapping.ValidateAccountName(r.ADAccount); err != nil {
+			return fmt.Errorf("target AD account: %w", err)
+		}
 	}
 	return nil
 }

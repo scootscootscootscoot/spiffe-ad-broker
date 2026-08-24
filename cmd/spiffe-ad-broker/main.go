@@ -3,10 +3,12 @@
 //
 // It authenticates the caller by its SVID over mutual TLS, resolves the target
 // AD account from a local mapping snapshot, validates the caller's PKCS#10
-// request, and asks the configured backend to issue. Neither backend can issue
-// yet, so every well-formed request currently ends in a 501 — that refusal is
-// the point of the path being real: authentication, mapping, and validation
-// all run before it.
+// request, and asks the configured backend to issue.
+//
+// The adcs backend issues: it wraps the workload's request in a CMC signed by
+// an enrollment agent credential, asks ADCS to issue for the mapped account,
+// and refuses anything that comes back naming a different one. The
+// subordinate backend is still a stub and refuses with 501.
 //
 // Usage:
 //
@@ -15,11 +17,19 @@
 //	  -tls-cert /run/spire/svid.pem -tls-key /run/spire/svid.key \
 //	  -trust-bundle /run/spire/bundle.pem \
 //	  -mapping /etc/spiffe-ad-broker/mapping.json \
-//	  -backend adcs
+//	  -backend adcs \
+//	  -adcs-ces-url https://ca.example.com/Example%%20CA_CES_Certificate/service.svc/CES \
+//	  -adcs-template WorkloadPKINIT \
+//	  -adcs-agent-cert agent.pem -adcs-agent-key agent.key \
+//	  -adcs-client-cert ces-client.pem -adcs-client-key ces-client.key \
+//	  -adcs-ca-bundle ad-ca.pem
 package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,6 +62,18 @@ type options struct {
 	backend     string
 	maxAge      time.Duration
 	logFormat   string
+
+	// adcs backend. Two separate credentials, and they are not
+	// interchangeable: the agent signs the enrolment request, the client
+	// certificate authenticates the TLS connection to CES.
+	adcsCESURL     string
+	adcsTemplate   string
+	adcsAgentCert  string
+	adcsAgentKey   string
+	adcsClientCert string
+	adcsClientKey  string
+	adcsCABundle   string
+	adcsTimeout    time.Duration
 }
 
 func main() {
@@ -76,7 +98,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	backend, err := newBackend(opts.backend)
+	backend, err := newBackend(opts)
 	if err != nil {
 		return err
 	}
@@ -130,10 +152,11 @@ func run(args []string) error {
 		slog.String("snapshot_version", b.SnapshotVersion()),
 		slog.Int("mappings", b.MappingCount()),
 	)
-	// Said plainly rather than left for someone to discover from a 501: the
-	// path in front of the backends is real, the backends are not.
-	log.Warn("no issuance backend is implemented; every well-formed request will be refused with not_implemented",
-		slog.String("backend", b.BackendName()))
+	// Said plainly rather than left for someone to discover from a 501.
+	if opts.backend == "subordinate" {
+		log.Warn("the subordinate backend is not implemented; every well-formed request will be refused with not_implemented",
+			slog.String("backend", b.BackendName()))
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -175,6 +198,17 @@ func parseFlags(args []string) (options, error) {
 		"report the mapping snapshot as stale beyond this age; 0 disables. Staleness never refuses issuance")
 	fs.StringVar(&opts.logFormat, "log-format", "text", `log format: "text" or "json"`)
 
+	fs.StringVar(&opts.adcsCESURL, "adcs-ces-url", "", "adcs: Certificate Enrollment Web Service endpoint (https)")
+	fs.StringVar(&opts.adcsTemplate, "adcs-template", "", "adcs: certificate template to enrol the target account from")
+	fs.StringVar(&opts.adcsAgentCert, "adcs-agent-cert", "",
+		"adcs: PEM file holding the enrollment agent certificate, which must carry the Certificate Request Agent policy")
+	fs.StringVar(&opts.adcsAgentKey, "adcs-agent-key", "", "adcs: PEM file holding the private key for -adcs-agent-cert")
+	fs.StringVar(&opts.adcsClientCert, "adcs-client-cert", "",
+		"adcs: PEM file holding the client certificate that authenticates to CES (not the enrollment agent certificate)")
+	fs.StringVar(&opts.adcsClientKey, "adcs-client-key", "", "adcs: PEM file holding the private key for -adcs-client-cert")
+	fs.StringVar(&opts.adcsCABundle, "adcs-ca-bundle", "", "adcs: PEM bundle of CAs that issue the CES server certificate")
+	fs.DurationVar(&opts.adcsTimeout, "adcs-timeout", 30*time.Second, "adcs: bound on one CES round trip")
+
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -194,18 +228,94 @@ func parseFlags(args []string) (options, error) {
 			return options{}, fmt.Errorf("-%s is required", required.flag)
 		}
 	}
+
+	if opts.backend == "adcs" {
+		for _, required := range []struct{ flag, value string }{
+			{"adcs-ces-url", opts.adcsCESURL},
+			{"adcs-template", opts.adcsTemplate},
+			{"adcs-agent-cert", opts.adcsAgentCert},
+			{"adcs-agent-key", opts.adcsAgentKey},
+			{"adcs-client-cert", opts.adcsClientCert},
+			{"adcs-client-key", opts.adcsClientKey},
+			{"adcs-ca-bundle", opts.adcsCABundle},
+		} {
+			if required.value == "" {
+				fs.Usage()
+				return options{}, fmt.Errorf("-%s is required with -backend adcs", required.flag)
+			}
+		}
+	}
 	return opts, nil
 }
 
-func newBackend(name string) (issuer.Issuer, error) {
-	switch name {
+func newBackend(opts options) (issuer.Issuer, error) {
+	switch opts.backend {
 	case "adcs":
-		return adcs.New(), nil
+		return newADCSBackend(opts)
 	case "subordinate":
 		return subordinate.New(), nil
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want %q or %q)", name, "adcs", "subordinate")
+		return nil, fmt.Errorf("unknown backend %q (want %q or %q)", opts.backend, "adcs", "subordinate")
 	}
+}
+
+// newADCSBackend assembles the two credentials the adcs backend needs.
+//
+// They are separate on purpose and cannot be collapsed. The agent credential
+// signs the enrolment request and must carry the Certificate Request Agent
+// application policy; the client credential authenticates the TLS connection
+// to CES and must carry Client Authentication and map to an AD account. An
+// enrollment agent certificate carries the first and not the second.
+func newADCSBackend(opts options) (issuer.Issuer, error) {
+	agentPair, err := tls.LoadX509KeyPair(opts.adcsAgentCert, opts.adcsAgentKey)
+	if err != nil {
+		return nil, fmt.Errorf("adcs enrollment agent credential: %w", err)
+	}
+	agentCert, err := x509.ParseCertificate(agentPair.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("adcs enrollment agent certificate: %w", err)
+	}
+	agentKey, ok := agentPair.PrivateKey.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("adcs enrollment agent key of type %T cannot sign", agentPair.PrivateKey)
+	}
+	agent := &adcs.Agent{Certificate: agentCert, Key: agentKey}
+	for _, der := range agentPair.Certificate[1:] {
+		c, err := x509.ParseCertificate(der)
+		if err != nil {
+			return nil, fmt.Errorf("adcs enrollment agent chain: %w", err)
+		}
+		agent.Chain = append(agent.Chain, c)
+	}
+
+	clientPair, err := tls.LoadX509KeyPair(opts.adcsClientCert, opts.adcsClientKey)
+	if err != nil {
+		return nil, fmt.Errorf("adcs CES client credential: %w", err)
+	}
+	bundlePEM, err := os.ReadFile(opts.adcsCABundle)
+	if err != nil {
+		return nil, fmt.Errorf("adcs CA bundle: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(bundlePEM) {
+		return nil, fmt.Errorf("adcs CA bundle %s holds no certificates", opts.adcsCABundle)
+	}
+
+	return adcs.New(adcs.Config{
+		CESURL:   opts.adcsCESURL,
+		Template: opts.adcsTemplate,
+		Agent:    agent,
+		Client: &http.Client{
+			Timeout: opts.adcsTimeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					MinVersion:   tls.VersionTLS12,
+					Certificates: []tls.Certificate{clientPair},
+					RootCAs:      roots,
+				},
+			},
+		},
+	})
 }
 
 func newLogger(format string) (*slog.Logger, error) {

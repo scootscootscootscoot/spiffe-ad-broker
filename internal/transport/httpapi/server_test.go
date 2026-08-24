@@ -22,7 +22,7 @@ import (
 
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/broker"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer"
-	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/adcs"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/subordinate"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/mapping"
 )
 
@@ -168,7 +168,7 @@ func wantStatusAndReason(t *testing.T, resp *http.Response, status int, reason b
 // validated, and the backend refuses because it does not exist yet. That
 // 501 is the whole authenticate-and-map path working.
 func TestMappedCallerReachesTheBackend(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	resp := postIssue(t, c, srv.URL, "application/json", issueBody(t))
@@ -177,7 +177,7 @@ func TestMappedCallerReachesTheBackend(t *testing.T) {
 
 // Fail closed: authenticated, but mapped to nothing.
 func TestUnmappedCallerIsForbidden(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, unmappedCaller))
 
 	resp := postIssue(t, c, srv.URL, "application/json", issueBody(t))
@@ -187,7 +187,7 @@ func TestUnmappedCallerIsForbidden(t *testing.T) {
 // No client certificate means no identity, and the refusal happens in the
 // handshake — the handler is never reached and no body is ever read.
 func TestCallerWithoutCertificateNeverReachesTheHandler(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca) // no client certificate
 
 	req, err := http.NewRequest(http.MethodPost, srv.URL+IssuePath, strings.NewReader(issueBody(t)))
@@ -204,7 +204,7 @@ func TestCallerWithoutCertificateNeverReachesTheHandler(t *testing.T) {
 
 // A certificate that verifies but is not an SVID authenticates nobody.
 func TestVerifiedCertificateWithoutSPIFFEIDIsUnauthenticated(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	notAnSVID := ca.leaf(t, leafOpts{
 		dns:   []string{"db.example.org"},
 		usage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -262,7 +262,7 @@ func TestSuccessReturnsCertificateAndChain(t *testing.T) {
 }
 
 func TestWrongMethodIsNotAllowed(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	resp, err := c.Get(srv.URL + IssuePath)
@@ -279,7 +279,7 @@ func TestWrongMethodIsNotAllowed(t *testing.T) {
 }
 
 func TestUnknownRouteIsNotFound(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	resp, err := c.Get(srv.URL + "/debug/pprof/")
@@ -293,7 +293,7 @@ func TestUnknownRouteIsNotFound(t *testing.T) {
 }
 
 func TestBadRequestsAreRefused(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	cases := []struct {
@@ -325,7 +325,7 @@ func TestBadRequestsAreRefused(t *testing.T) {
 // A well-formed PEM block that is not a PKCS#10 request must be refused as a
 // bad request, not treated as an internal failure.
 func TestNonCSRDERIsRefused(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	garbage := string(pem.EncodeToMemory(&pem.Block{
@@ -341,7 +341,7 @@ func TestNonCSRDERIsRefused(t *testing.T) {
 }
 
 func TestOversizedBodyIsRefused(t *testing.T) {
-	srv, ca := newTestServer(t, adcs.New())
+	srv, ca := newTestServer(t, subordinate.New())
 	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
 
 	body := `{"csr":"` + strings.Repeat("A", maxRequestBytes+1) + `"}`

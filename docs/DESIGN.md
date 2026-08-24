@@ -69,7 +69,7 @@ separate credential from something AD already trusts.**
 ```
 workload ──SVID over mTLS──▶ broker ──▶ issuer backend ──▶ AD-auth certificate
                                │
-                               └──▶ mapping snapshot (SPIFFE ID → AD SID)
+                               └──▶ mapping snapshot (SPIFFE ID → AD account)
 ```
 
 The broker:
@@ -112,6 +112,46 @@ target. Constraining it is a CA-side configuration job — enrollment agent rest
 template ACLs scoped to the accounts in the mapping — not something this code can do
 alone.
 
+#### How it asks
+
+The workload's PKCS#10 goes, verbatim and unread, into a CMC (RFC 5272, carried in a CMS
+`SignedData`) whose `regInfo` control names the target account, and the whole thing is
+signed by the enrollment agent. The CA builds the subject from Active Directory for the
+account the CMC names, so the workload contributes a public key and nothing else.
+
+Three things about that were established experimentally, against Windows Server 2025,
+and are recorded in
+[the finding](findings/2026-08-24-enroll-on-behalf-of.md):
+
+- **The name must be inside the signature.** Passing it as an unsigned submission
+  attribute is accepted, returns success, and is ignored — the CA issues for the
+  *caller's* account instead.
+- **One signature is enough.** Microsoft's client signs the CMC twice, with the agent
+  and with the request's own key. The broker can only ever produce the first, because
+  the workload keeps its private key; ADCS accepts that. The whole shape depended on it.
+- **The wire tagging is not the obvious one.** A CMC rides the CES `BinarySecurityToken`
+  as `…wssecurity-secext-1.0.xsd#PKCS7`, with no `CertificateTemplate` context item.
+
+#### What it must not assume
+
+Naming the target account is a *request*, and a CA that does not honour it does not
+refuse. It issues a valid, correctly chained certificate for the wrong principal. So
+every issued certificate is read back: the backend refuses unless the AD SID extension
+names the SID the mapping asked for, and unless a chain to the leaf's immediate issuer
+came with it. Issuance is delegated; the security decision is not.
+
+#### What a deployment has to provide
+
+- A certificate template requiring **one** authorised signature carrying the Certificate
+  Request Agent application policy, with the subject built from Active Directory.
+- An **enrollment agent credential** for the broker.
+- A **second, separate client credential** authenticating the broker's TLS connection to
+  CES. These are not interchangeable: an enrollment agent certificate carries the
+  Certificate Request Agent policy and not Client Authentication. The broker therefore
+  has an AD identity of its own.
+- The two `http.sys` settings recorded in
+  [the request-path finding](findings/2026-08-17-adcs-request-path.md).
+
 ### `subordinate` — broker-controlled CA (shape B)
 
 The broker issues from a dedicated CA it controls, subordinate to the corporate PKI and
@@ -141,7 +181,11 @@ SID. The security model is enforced there, once, so it cannot diverge between ba
   identity.
 - Proof-of-possession is verified. Without it a caller could present a public key it
   does not hold, and the broker would mint an AD credential usable by whoever does.
-- The **SID comes from the mapping and nowhere else.**
+- The **AD account comes from the mapping and nowhere else** — both its SID and, where
+  the snapshot carries one, its `DOMAIN\samAccountName`. The `adcs` backend needs the
+  name, because an enrollment agent names its target by name and the SID is only what
+  comes back. Neither is derived from the other: resolving one to the other would put a
+  directory lookup on the issuance path and move the decision out of the snapshot.
 - Validation runs *before* the backend does anything, including before an unimplemented
   backend refuses — so the guarantees hold from the day a backend starts issuing.
 
@@ -208,7 +252,7 @@ vocabulary; it does not invent categories.
 | `unauthenticated` | 401 | No usable SPIFFE ID from a verified peer certificate |
 | `invalid_request` | 400 | Malformed body, CSR, or failed proof-of-possession |
 | `no_mapping` | 403 | Authenticated, but mapped to no account — the fail-closed default |
-| `not_implemented` | 501 | The configured backend cannot issue yet |
+| `not_implemented` | 501 | The configured backend cannot issue yet (`subordinate`) |
 | `internal` | 500 | Failed for a reason the caller cannot act on |
 
 `no_mapping` is 403 rather than 404: the caller authenticated and was denied, which is

@@ -43,7 +43,11 @@ const (
 )
 
 // rstTemplate is the RequestSecurityToken envelope, laid out to match what a
-// Windows client sends. Every substituted value is XML-escaped by buildRST.
+// Windows client sends. Every substituted value is XML-escaped by buildRSTBody.
+//
+// The substitutions are, in order: message ID, destination, the token's
+// ValueType, the base64 request, and the AdditionalContext element (which is
+// omitted entirely for a CMC — see buildRSTForCMC).
 const rstTemplate = `<s:Envelope xmlns:a="http://www.w3.org/2005/08/addressing" xmlns:s="http://www.w3.org/2003/05/soap-envelope">` +
 	`<s:Header>` +
 	`<a:Action s:mustUnderstand="1">` + actionRST + `</a:Action>` +
@@ -54,30 +58,63 @@ const rstTemplate = `<s:Envelope xmlns:a="http://www.w3.org/2005/08/addressing" 
 	`<RequestSecurityToken PreferredLanguage="en-US" xmlns="http://docs.oasis-open.org/ws-sx/ws-trust/200512">` +
 	`<TokenType>` + tokenTypeX509 + `</TokenType>` +
 	`<RequestType>` + requestTypeIssue + `</RequestType>` +
-	`<BinarySecurityToken ValueType="` + valueTypePKCS10 + `" EncodingType="` + encodingTypeBase64 + `"` +
+	`<BinarySecurityToken ValueType="%s" EncodingType="` + encodingTypeBase64 + `"` +
 	` a:Id="" xmlns:a="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"` +
 	` xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">%s</BinarySecurityToken>` +
-	`<AdditionalContext xmlns="http://schemas.xmlsoap.org/ws/2006/12/authorization">` +
-	`<ContextItem Name="CertificateTemplate"><Value>%s</Value></ContextItem>` +
-	`</AdditionalContext>` +
+	`%s` +
 	`</RequestSecurityToken>` +
 	`</s:Body>` +
 	`</s:Envelope>`
 
-// buildRST renders the enrollment request for csrDER against templateName.
+// templateContext names the certificate template outside the request. Only
+// the PKCS#10 form needs it.
+const templateContext = `<AdditionalContext xmlns="http://schemas.xmlsoap.org/ws/2006/12/authorization">` +
+	`<ContextItem Name="CertificateTemplate"><Value>%s</Value></ContextItem>` +
+	`</AdditionalContext>`
+
+// buildRST renders an enrollment request for csrDER against templateName.
 //
 // csrDER is the workload's PKCS#10, passed through verbatim. Nothing in it is
 // read here, and nothing about the target account is expressed here: this
-// function carries bytes, it does not make an authorization decision.
+// function carries bytes, it does not make an authorization decision. It
+// enrols whoever the transport authenticated as, which is why the broker uses
+// buildRSTForCMC instead.
 func buildRST(to, templateName string, csrDER []byte, messageID string) ([]byte, error) {
-	if to == "" {
-		return nil, errors.New("wstep: no CES endpoint")
-	}
 	if templateName == "" {
 		return nil, errors.New("wstep: no certificate template")
 	}
 	if len(csrDER) == 0 {
 		return nil, errors.New("wstep: empty CSR")
+	}
+	return buildRSTBody(to, valueTypePKCS10, csrDER, messageID,
+		fmt.Sprintf(templateContext, escape(templateName)))
+}
+
+// buildRSTForCMC renders an enrollment request carrying cmcDER, a CMC that
+// names the account to issue for and is signed by the enrollment agent.
+//
+// Two things differ from the PKCS#10 form, and both were captured from
+// Microsoft's own client rather than derived — see
+// testdata/rst-cmc-windows-client.xml:
+//
+//   - The ValueType is the wssecurity-secext "#PKCS7" value, the same one
+//     ADCS uses to tag the chain it returns. It is *not* an "#CMC" spelling
+//     under the enrollment namespace, which is the obvious guess.
+//
+//   - There is no CertificateTemplate context item. The template is named
+//     inside the CMC, where the agent's signature covers it. Naming it
+//     outside as well would put the same decision in two places, one of them
+//     unsigned.
+func buildRSTForCMC(to string, cmcDER []byte, messageID string) ([]byte, error) {
+	if len(cmcDER) == 0 {
+		return nil, errors.New("wstep: empty CMC request")
+	}
+	return buildRSTBody(to, valueTypePKCS7, cmcDER, messageID, "")
+}
+
+func buildRSTBody(to, valueType string, der []byte, messageID, context string) ([]byte, error) {
+	if to == "" {
+		return nil, errors.New("wstep: no CES endpoint")
 	}
 	if messageID == "" {
 		return nil, errors.New("wstep: no message ID")
@@ -85,8 +122,9 @@ func buildRST(to, templateName string, csrDER []byte, messageID string) ([]byte,
 	body := fmt.Sprintf(rstTemplate,
 		escape(messageID),
 		escape(to),
-		base64.StdEncoding.EncodeToString(csrDER),
-		escape(templateName),
+		valueType,
+		base64.StdEncoding.EncodeToString(der),
+		context,
 	)
 	return []byte(body), nil
 }

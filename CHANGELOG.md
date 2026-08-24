@@ -9,6 +9,58 @@ release. Nothing has been released yet, so everything sits under Unreleased.
 
 ### Added
 
+- **`internal/issuer/adcs` issues.** `Issue` wraps the workload's PKCS#10 — unread and
+  unmodified — in a CMC that names the mapped AD account and is signed by an enrollment
+  agent credential, POSTs it to CES, and returns the certificate ADCS issues for that
+  account. The workload keeps its private key throughout; the broker signs only as the
+  agent. Proven against a live Windows Server 2025 CA: request 17, issued for
+  `pkinittest` (`…-1103`) from a request the broker built.
+- `internal/issuer/adcs/cmc.go` — the CMC (RFC 5272 in RFC 5652 CMS) enrol-on-behalf-of
+  encoder, hand-built because this module takes no dependencies. The CMC body is
+  deterministic, so it is pinned **byte for byte** to a request captured from
+  Microsoft's own client, not merely structurally.
+- `adcs.Agent` — the enrollment agent credential, behind `crypto.Signer` so an HSM or
+  KMS signer works unchanged. It refuses a certificate that does not carry the
+  Certificate Request Agent application policy: without it the CA ignores the requester
+  name and issues for the caller's own account, which is a wrong success rather than a
+  failure.
+- `adcs.Config` / `adcs.New` — CES endpoint, template, agent credential and HTTP client.
+  Configuration failures refuse at startup rather than turning every first credential
+  request into something that looks like a backend fault. The endpoint must be https.
+- `mapping.Entry.ADAccount` (`ad_account`) and `mapping.Account` — the target account's
+  `DOMAIN\samAccountName`, alongside its SID. An enrollment agent names its target by
+  *name*; the SID is what comes back, not what goes out. Both come from the authoritative
+  snapshot and neither is derived from the other, because resolving one to the other
+  would put a directory lookup on the issuance path. Optional per entry: `subordinate`
+  never needs it, and the `adcs` backend refuses without it.
+- `mapping.ValidateAccountName` — `DOMAIN\samAccountName`, one separator, and a
+  character set deliberately narrower than Active Directory's. `&`, `=` and `%` are
+  refused specifically: unescaped, each could restate the authorization inside the CMC's
+  `regInfo` string.
+- `issuer.Request.ADAccount`, validated in `Request.Validate` when present, so a
+  malformed name is refused in the one place the security model lives rather than at
+  whichever backend happens to read it.
+- `internal/issuer/adcs/testdata/cmc-eobo-windows-client.der`,
+  `eobo-issued-cert.der`, `rst-cmc-windows-client.xml` — three more real captures: the
+  CMC Microsoft's client builds, the certificate it produced (carrying the *target's*
+  SID, not the agent's), and the CES envelope that carries a CMC. Synthetic lab forest,
+  no key material.
+- `docs/findings/2026-08-24-enroll-on-behalf-of.md` — the requester name must be inside
+  the enrollment agent's signature, in the CMC `regInfo` control, with the domain
+  separator percent-encoded as `%5C`. Passing it as an unsigned submission attribute is
+  **accepted, ignored, and silent**: the CA returns a valid certificate for the caller's
+  own account. Also settles that ADCS accepts a CMC signed by the agent alone — the
+  broker can never produce the second signature `certreq` adds, so the whole shape
+  depended on it — and that a CMC rides the CES wire tagged `…secext-1.0.xsd#PKCS7`
+  with no `CertificateTemplate` context item.
+- `-adcs-ces-url`, `-adcs-template`, `-adcs-agent-cert`, `-adcs-agent-key`,
+  `-adcs-client-cert`, `-adcs-client-key`, `-adcs-ca-bundle`, `-adcs-timeout`, all
+  required with `-backend adcs`. The agent credential and the CES client credential are
+  **separate and not interchangeable**: an enrollment agent certificate carries the
+  Certificate Request Agent policy and not Client Authentication, so it cannot
+  authenticate the TLS connection to a CES endpoint configured for certificate
+  authentication.
+
 - `encoding.BuildNTDSCASecurityExt` — the AD SID security extension
   (`szOID_NTDS_CA_SECURITY_EXT`), pinned byte for byte to a fixture taken from a
   certificate a real ADCS Enterprise CA issued. This was the one item on the board that
@@ -50,6 +102,18 @@ release. Nothing has been released yet, so everything sits under Unreleased.
   unusable from Go.
 
 ### Changed
+
+- **The `adcs` backend checks what it gets back.** Every issued certificate is read for
+  its AD SID extension and refused unless it names the SID the mapping asked for, along
+  with a chain to its immediate issuer. This is not defensive decoration: an ADCS
+  deployment where the requester name is not honoured does not fail, it issues a valid,
+  correctly chained certificate for the wrong principal. Delegating issuance is not
+  delegating the security decision.
+- `wstep.buildRST` grew a sibling, `buildRSTForCMC`, and the envelope's
+  `AdditionalContext` element is now optional rather than always present.
+- `mapping.Registry.Lookup` returns a `mapping.Account` rather than a bare SID string.
+- `adcs.New` takes a `Config` and returns an error. The startup banner no longer claims
+  no backend is implemented; it warns only when `subordinate` is configured.
 
 - `internal/issuer/adcs` no longer describes the request path as undecided. `Issue` still
   refuses, but for a narrower reason: the transport is built and proven, and what is
