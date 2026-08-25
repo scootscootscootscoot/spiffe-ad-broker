@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,8 @@ import (
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/subordinate"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/mapping"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/ratelimit"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/record"
 )
 
 const (
@@ -47,7 +50,7 @@ func (f *fakeIssuer) Issue(_ context.Context, req issuer.Request) (*issuer.Crede
 	return f.cred, nil
 }
 
-func newTestBroker(t *testing.T, backend issuer.Issuer) *broker.Broker {
+func newTestBroker(t *testing.T, backend issuer.Issuer, mutate func(*broker.Config)) *broker.Broker {
 	t.Helper()
 	doc := fmt.Sprintf(`{
 	  "version": "test-1",
@@ -58,11 +61,16 @@ func newTestBroker(t *testing.T, backend issuer.Issuer) *broker.Broker {
 	if err != nil {
 		t.Fatalf("parse snapshot: %v", err)
 	}
-	b, err := broker.New(broker.Config{
+	cfg := broker.Config{
 		Registry: registry,
 		Backend:  backend,
 		Logger:   slog.New(slog.DiscardHandler),
-	})
+		Record:   record.Discard{},
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	b, err := broker.New(cfg)
 	if err != nil {
 		t.Fatalf("broker.New: %v", err)
 	}
@@ -74,9 +82,14 @@ func newTestBroker(t *testing.T, backend issuer.Issuer) *broker.Broker {
 // ConnectionState.
 func newTestServer(t *testing.T, backend issuer.Issuer) (*httptest.Server, *testCA) {
 	t.Helper()
+	return newTestServerWith(t, backend, nil)
+}
+
+func newTestServerWith(t *testing.T, backend issuer.Issuer, mutate func(*broker.Config)) (*httptest.Server, *testCA) {
+	t.Helper()
 	ca := newTestCA(t)
 
-	s, err := NewServer(newTestBroker(t, backend), slog.New(slog.DiscardHandler))
+	s, err := NewServer(newTestBroker(t, backend, mutate), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -348,5 +361,52 @@ func TestOversizedBodyIsRefused(t *testing.T) {
 	resp := postIssue(t, c, srv.URL, "application/json", body)
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+// A rate-limited caller gets 429 and, crucially, a Retry-After it can act on.
+// The delay comes from the limiter's own arithmetic, so a client that honours
+// it is admitted next time instead of being refused again.
+func TestRateLimitedCallerGets429AndRetryAfter(t *testing.T) {
+	srv, ca := newTestServerWith(t, subordinate.New(), func(cfg *broker.Config) {
+		cfg.CallerLimit = ratelimit.NewKeyed(0.0001, 1, time.Minute)
+	})
+	c := clientWith(ca, ca.workloadCert(t, mappedCaller))
+
+	resp := postIssue(t, c, srv.URL, "application/json", issueBody(t))
+	wantStatusAndReason(t, resp, http.StatusNotImplemented, broker.ReasonNotImplemented)
+
+	resp = postIssue(t, c, srv.URL, "application/json", issueBody(t))
+	wantStatusAndReason(t, resp, http.StatusTooManyRequests, broker.ReasonRateLimited)
+
+	retry := resp.Header.Get("Retry-After")
+	if retry == "" {
+		t.Fatal("429 carried no Retry-After")
+	}
+	secs, err := strconv.Atoi(retry)
+	if err != nil || secs < 1 {
+		t.Fatalf("Retry-After = %q, want whole seconds >= 1", retry)
+	}
+}
+
+// Every other refusal is a decision that waiting will not change, so none of
+// them may offer a delay — a Retry-After on a permanent no invites a retry
+// loop against it.
+func TestOnlyRateLimitingCarriesRetryAfter(t *testing.T) {
+	srv, ca := newTestServer(t, subordinate.New())
+
+	for _, tc := range []struct {
+		name string
+		cert tls.Certificate
+	}{
+		{"not implemented", ca.workloadCert(t, mappedCaller)},
+		{"no mapping", ca.workloadCert(t, unmappedCaller)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := postIssue(t, clientWith(ca, tc.cert), srv.URL, "application/json", issueBody(t))
+			if got := resp.Header.Get("Retry-After"); got != "" {
+				t.Errorf("Retry-After = %q on a refusal that waiting cannot change", got)
+			}
+		})
 	}
 }

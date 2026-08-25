@@ -10,6 +10,13 @@
 // and refuses anything that comes back naming a different one. The
 // subordinate backend is still a stub and refuses with 501.
 //
+// Two bounds apply to every request. A per-caller rate limit caps the work one
+// workload can cause, and a global one caps this broker's aggregate draw on
+// the CA. Both are token buckets, so a rotation wave still gets through.
+// Separately, every issued credential is appended to -issuance-record before
+// it is returned; a credential that cannot be recorded is not handed over,
+// because nobody could revoke it.
+//
 // Usage:
 //
 //	spiffe-ad-broker \
@@ -17,6 +24,7 @@
 //	  -tls-cert /run/spire/svid.pem -tls-key /run/spire/svid.key \
 //	  -trust-bundle /run/spire/bundle.pem \
 //	  -mapping /etc/spiffe-ad-broker/mapping.json \
+//	  -issuance-record /var/lib/spiffe-ad-broker/issued.jsonl \
 //	  -backend adcs \
 //	  -adcs-ces-url https://ca.example.com/Example%%20CA_CES_Certificate/service.svc/CES \
 //	  -adcs-template WorkloadPKINIT \
@@ -46,6 +54,8 @@ import (
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/adcs"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/subordinate"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/mapping"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/ratelimit"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/record"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/tlsconf"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/transport/httpapi"
 )
@@ -62,6 +72,15 @@ type options struct {
 	backend     string
 	maxAge      time.Duration
 	logFormat   string
+
+	// Bounds on how much work a caller, and the service as a whole, may
+	// cause. recordPath is where issued credentials are accounted for.
+	recordPath  string
+	callerRate  float64
+	callerBurst int
+	globalRate  float64
+	globalBurst int
+	limiterIdle time.Duration
 
 	// adcs backend. Two separate credentials, and they are not
 	// interchangeable: the agent signs the enrolment request, the client
@@ -103,11 +122,20 @@ func run(args []string) error {
 		return err
 	}
 
+	recorder, err := newRecorder(opts, log)
+	if err != nil {
+		return err
+	}
+	defer recorder.Close()
+
 	b, err := broker.New(broker.Config{
 		Registry:       registry,
 		Backend:        backend,
 		Logger:         log,
 		MaxSnapshotAge: opts.maxAge,
+		CallerLimit:    ratelimit.NewKeyed(opts.callerRate, opts.callerBurst, opts.limiterIdle),
+		GlobalLimit:    ratelimit.New(opts.globalRate, opts.globalBurst),
+		Record:         recorder,
 	})
 	if err != nil {
 		return err
@@ -151,7 +179,16 @@ func run(args []string) error {
 		slog.String("backend", b.BackendName()),
 		slog.String("snapshot_version", b.SnapshotVersion()),
 		slog.Int("mappings", b.MappingCount()),
+		slog.String("issuance_record", opts.recordPath),
 	)
+	// A disabled limit is a deployment decision, not a default, so it is said
+	// out loud rather than inferred from the absence of a line.
+	if opts.callerRate <= 0 || opts.callerBurst <= 0 {
+		log.Warn("the per-caller rate limit is disabled; one caller can spend all of this process's CPU on proof-of-possession checks")
+	}
+	if opts.globalRate <= 0 || opts.globalBurst <= 0 {
+		log.Warn("the global rate limit is disabled; this broker will place no bound on its own load against the CA")
+	}
 	// Said plainly rather than left for someone to discover from a 501.
 	if opts.backend == "subordinate" {
 		log.Warn("the subordinate backend is not implemented; every well-formed request will be refused with not_implemented",
@@ -198,6 +235,24 @@ func parseFlags(args []string) (options, error) {
 		"report the mapping snapshot as stale beyond this age; 0 disables. Staleness never refuses issuance")
 	fs.StringVar(&opts.logFormat, "log-format", "text", `log format: "text" or "json"`)
 
+	fs.StringVar(&opts.recordPath, "issuance-record", "",
+		"append-only file recording every credential issued; required with a backend that can issue")
+
+	// Deliberately low. Issuance is a rare event in the life of a workload —
+	// one credential per SVID rotation at most — so a caller asking more often
+	// than this is retrying, not working, and the burst is what absorbs a
+	// fleet coming back at the same time.
+	fs.Float64Var(&opts.callerRate, "rate-per-caller", 0.1,
+		"sustained requests per second allowed from one caller; 0 disables the per-caller limit")
+	fs.IntVar(&opts.callerBurst, "burst-per-caller", 5,
+		"requests one caller may make at once before the sustained rate applies")
+	fs.Float64Var(&opts.globalRate, "rate-global", 2,
+		"sustained requests per second this broker will ask the backend for, in total; 0 disables the global limit")
+	fs.IntVar(&opts.globalBurst, "burst-global", 20,
+		"requests the broker will pass to the backend at once before the sustained rate applies")
+	fs.DurationVar(&opts.limiterIdle, "rate-limit-idle", ratelimit.DefaultIdle,
+		"how long an unused per-caller bucket is retained before it is evicted")
+
 	fs.StringVar(&opts.adcsCESURL, "adcs-ces-url", "", "adcs: Certificate Enrollment Web Service endpoint (https)")
 	fs.StringVar(&opts.adcsTemplate, "adcs-template", "", "adcs: certificate template to enrol the target account from")
 	fs.StringVar(&opts.adcsAgentCert, "adcs-agent-cert", "",
@@ -238,6 +293,13 @@ func parseFlags(args []string) (options, error) {
 			{"adcs-client-cert", opts.adcsClientCert},
 			{"adcs-client-key", opts.adcsClientKey},
 			{"adcs-ca-bundle", opts.adcsCABundle},
+
+			// Grouped with the adcs flags because adcs is the only backend
+			// that can issue today. The rule is about capability, not about
+			// this particular backend: a broker that can mint AD credentials
+			// must keep an account of the ones it minted, or nobody can
+			// revoke them.
+			{"issuance-record", opts.recordPath},
 		} {
 			if required.value == "" {
 				fs.Usage()
@@ -246,6 +308,23 @@ func parseFlags(args []string) (options, error) {
 		}
 	}
 	return opts, nil
+}
+
+// newRecorder opens the issuance record, or returns the discarding one when
+// the configured backend cannot issue.
+//
+// Opening happens at startup on purpose. A broker that cannot write its record
+// should fail to start, rather than discover it while refusing a caller that
+// did nothing wrong.
+func newRecorder(opts options, log *slog.Logger) (record.Recorder, error) {
+	if opts.recordPath == "" {
+		// Only reachable for a backend that cannot issue: parseFlags requires
+		// the flag otherwise.
+		log.Warn("no -issuance-record configured; nothing this process does will be accounted for after it exits",
+			slog.String("backend", opts.backend))
+		return record.Discard{}, nil
+	}
+	return record.Open(opts.recordPath)
 }
 
 func newBackend(opts options) (issuer.Issuer, error) {

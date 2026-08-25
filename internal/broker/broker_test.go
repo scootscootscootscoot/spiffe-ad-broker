@@ -18,6 +18,8 @@ import (
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/issuer/subordinate"
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/mapping"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/ratelimit"
+	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/record"
 )
 
 const (
@@ -98,6 +100,7 @@ func newBroker(t *testing.T, backend issuer.Issuer, mutate func(*Config)) *Broke
 		Registry: snapshot(t, time.Now().Add(-time.Hour)),
 		Backend:  backend,
 		Logger:   slog.New(slog.DiscardHandler),
+		Record:   record.Discard{},
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -131,6 +134,15 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 	if _, err := New(Config{Registry: snapshot(t, time.Now())}); err == nil {
 		t.Error("accepted a config with no backend")
 	}
+	// Not defaulted to a discarding recorder: a broker that keeps no account
+	// of what it issued cannot revoke it, and that has to be chosen, not
+	// inherited from a zero value.
+	if _, err := New(Config{
+		Registry: snapshot(t, time.Now()),
+		Backend:  subordinate.New(),
+	}); err == nil {
+		t.Error("accepted a config with no issuance recorder")
+	}
 }
 
 // A future-dated snapshot means a broken producer clock or a tampered
@@ -141,6 +153,7 @@ func TestNewRefusesFutureDatedSnapshot(t *testing.T) {
 		Registry: snapshot(t, time.Now().Add(2*time.Hour)),
 		Backend:  subordinate.New(),
 		Logger:   slog.New(slog.DiscardHandler),
+		Record:   record.Discard{},
 	})
 	if err == nil {
 		t.Fatal("accepted a future-dated snapshot")
@@ -301,4 +314,198 @@ func TestSuccessfulIssuanceIsReturned(t *testing.T) {
 	if got != want {
 		t.Fatalf("Issue returned %v, want the backend's credential", got)
 	}
+}
+
+// --- rate limiting -------------------------------------------------------
+
+// A caller that retries in a tight loop must be cut off, and told when to come
+// back rather than left to guess.
+func TestPerCallerRateLimitRefusesWithARetryDelay(t *testing.T) {
+	backend := &recordingIssuer{err: issuer.ErrNotImplemented}
+	b := newBroker(t, backend, func(cfg *Config) {
+		// One token, refilling slowly enough that no real time during the
+		// test can hand back a second one.
+		cfg.CallerLimit = ratelimit.NewKeyed(0.0001, 1, time.Minute)
+	})
+
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonNotImplemented)
+	if backend.got == nil {
+		t.Fatal("the first request never reached the backend")
+	}
+
+	backend.got = nil
+	bErr := wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonRateLimited)
+	if bErr.RetryAfter <= 0 {
+		t.Errorf("RetryAfter = %v, want a positive delay the caller can act on", bErr.RetryAfter)
+	}
+	if backend.got != nil {
+		t.Error("a rate-limited request still reached the backend")
+	}
+}
+
+// The limit is per caller, not shared. One workload retrying must not deny
+// service to every other workload in the trust domain.
+func TestPerCallerRateLimitIsNotShared(t *testing.T) {
+	b := newBroker(t, &recordingIssuer{err: issuer.ErrNotImplemented}, func(cfg *Config) {
+		cfg.CallerLimit = ratelimit.NewKeyed(0.0001, 1, time.Minute)
+	})
+
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonNotImplemented)
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonRateLimited)
+
+	// A different caller still gets its own answer — no_mapping, which is a
+	// decision about that caller, not the exhausted budget of another one.
+	wantRefusal(t, mustIssue(t, b, unmappedCaller, newCSR(t)), ReasonNoMapping)
+}
+
+// The global limit exists to bound what this broker asks of the CA. A request
+// refused for any other reason never reached the CA, so it must not have spent
+// any of that budget.
+func TestGlobalRateLimitIsSpentOnlyOnRequestsThatReachTheBackend(t *testing.T) {
+	backend := &recordingIssuer{err: issuer.ErrNotImplemented}
+	b := newBroker(t, backend, func(cfg *Config) {
+		cfg.GlobalLimit = ratelimit.New(0.0001, 1)
+	})
+
+	// Three refusals that stop above the backend: no mapping, an unparseable
+	// CSR, and a proof-of-possession that does not verify.
+	wantRefusal(t, mustIssue(t, b, unmappedCaller, newCSR(t)), ReasonNoMapping)
+	wantRefusal(t, mustIssue(t, b, mappedCaller, []byte("not DER")), ReasonInvalidRequest)
+	wantRefusal(t, mustIssue(t, b, mappedCaller, tamperedCSR(t)), ReasonInvalidRequest)
+
+	// The single global token is therefore still there.
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonNotImplemented)
+	if backend.got == nil {
+		t.Fatal("refused requests consumed the global budget")
+	}
+
+	// And now it is spent.
+	backend.got = nil
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonRateLimited)
+	if backend.got != nil {
+		t.Error("a globally rate-limited request still reached the backend")
+	}
+}
+
+// --- the issuance record -------------------------------------------------
+
+type fakeRecorder struct {
+	got  []record.Issuance
+	err  error
+	shut bool
+}
+
+func (r *fakeRecorder) Record(_ context.Context, iss record.Issuance) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.got = append(r.got, iss)
+	return nil
+}
+
+func (r *fakeRecorder) Close() error { r.shut = true; return nil }
+
+// The record has to carry enough to revoke the certificate later, because the
+// CA is not a searchable index of "things this broker asked for".
+func TestIssuanceIsRecordedWithWhatRevocationNeeds(t *testing.T) {
+	leaf := selfSigned(t)
+	rec := &fakeRecorder{}
+	b := newBroker(t, &recordingIssuer{cred: &issuer.Credential{Certificate: leaf}}, func(cfg *Config) {
+		cfg.Record = rec
+	})
+
+	if _, err := b.Issue(context.Background(), mappedCaller, newCSR(t)); err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if len(rec.got) != 1 {
+		t.Fatalf("recorded %d issuances, want 1", len(rec.got))
+	}
+	got := rec.got[0]
+	if got.Serial != leaf.SerialNumber.String() {
+		t.Errorf("Serial = %q, want %q", got.Serial, leaf.SerialNumber.String())
+	}
+	if got.Issuer != leaf.Issuer.String() {
+		t.Errorf("Issuer = %q, want %q", got.Issuer, leaf.Issuer.String())
+	}
+	if got.Caller != mappedCaller {
+		t.Errorf("Caller = %q, want %q", got.Caller, mappedCaller)
+	}
+	if got.ADSID != mappedSID {
+		t.Errorf("ADSID = %q, want %q", got.ADSID, mappedSID)
+	}
+	if got.SnapshotVersion != "test-1" {
+		t.Errorf("SnapshotVersion = %q, want %q", got.SnapshotVersion, "test-1")
+	}
+	if got.Fingerprint == "" || got.Time.IsZero() {
+		t.Errorf("record is missing a fingerprint or a timestamp: %+v", got)
+	}
+	if !got.NotAfter.Equal(leaf.NotAfter) {
+		t.Errorf("NotAfter = %v, want %v", got.NotAfter, leaf.NotAfter)
+	}
+}
+
+// Nothing is recorded for a refusal. The record answers "what exists", and a
+// refusal created nothing — and a durable line per refused request would turn
+// a refused flood into disk exhaustion.
+func TestRefusalsAreNotRecorded(t *testing.T) {
+	rec := &fakeRecorder{}
+	b := newBroker(t, &recordingIssuer{err: issuer.ErrNotImplemented}, func(cfg *Config) {
+		cfg.Record = rec
+	})
+	wantRefusal(t, mustIssue(t, b, mappedCaller, newCSR(t)), ReasonNotImplemented)
+	wantRefusal(t, mustIssue(t, b, unmappedCaller, newCSR(t)), ReasonNoMapping)
+	if len(rec.got) != 0 {
+		t.Fatalf("recorded %d refusals, want none: %+v", len(rec.got), rec.got)
+	}
+}
+
+// A credential that cannot be recorded cannot be revoked, so it is not handed
+// over. The certificate still exists at the CA — that is unavoidable by this
+// point — but it was never delivered, which leaves it inert.
+func TestUnrecordableIssuanceIsRefused(t *testing.T) {
+	var logged bytes.Buffer
+	leaf := selfSigned(t)
+	b := newBroker(t, &recordingIssuer{cred: &issuer.Credential{Certificate: leaf}}, func(cfg *Config) {
+		cfg.Record = &fakeRecorder{err: errors.New("disk full")}
+		cfg.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+	})
+
+	cred, err := b.Issue(context.Background(), mappedCaller, newCSR(t))
+	if cred != nil {
+		t.Fatal("an unrecordable credential was handed to the caller")
+	}
+	wantRefusal(t, err, ReasonInternal)
+
+	// The operator has to be able to find and revoke it by hand, so the
+	// serial that exists at the CA must be in the log.
+	if !bytes.Contains(logged.Bytes(), []byte(leaf.SerialNumber.String())) {
+		t.Errorf("the log does not name the serial that exists at the CA:\n%s", logged.String())
+	}
+}
+
+// selfSigned returns a parsed certificate with a real serial, issuer, and
+// validity window, so record fields are asserted against something a CA would
+// plausibly have produced rather than a zero value.
+func selfSigned(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(0x5eadbeef),
+		Subject:      pkix.Name{CommonName: "pkinittest"},
+		Issuer:       pkix.Name{CommonName: "Test Issuing CA"},
+		NotBefore:    time.Now().Add(-time.Minute).Truncate(time.Second),
+		NotAfter:     time.Now().Add(time.Hour).Truncate(time.Second),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	return cert
 }

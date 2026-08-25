@@ -9,6 +9,57 @@ release. Nothing has been released yet, so everything sits under Unreleased.
 
 ### Added
 
+- **`internal/ratelimit` — token buckets bounding what one caller, and the service as a
+  whole, may cause.** Under the `adcs` backend every accepted request becomes an
+  outbound enrolment against a CA the rest of the forest also depends on, so an
+  unbounded caller was an unbounded load on a shared resource this project does not own.
+  Two limits, taken at different points and protecting different things: the per-caller
+  one before the CSR is parsed, because it bounds the CPU one workload can spend on
+  proof-of-possession checks, and the global one immediately before the backend call,
+  because a request refused for any other reason never reached the CA and must not spend
+  the budget for reaching it. A token bucket rather than a fixed window so that a fleet
+  restarting together still gets through. No dependency: `golang.org/x/time/rate` does
+  this better in general, but the module's zero-dependency surface is an auditability
+  property of a credential-minting process.
+- **`internal/record` — a durable, append-only account of every credential issued.**
+  Everything was already logged, and a log is not an account: it rotates, it is sampled,
+  and in the shape this will deploy in it goes with the container. Two things need it —
+  revocation, which needs an issuer and serial the CA cannot be asked to search for, and
+  audit, since a certificate carrying an AD SID authenticates as that account. One JSON
+  object per line, fsynced before `Record` returns, mode 0600. Refusals are deliberately
+  *not* recorded: the record answers "what exists", a refusal created nothing, and a
+  durable line per refused request would turn a refused flood into disk exhaustion.
+- `broker.ReasonRateLimited` and `broker.Error.RetryAfter` — a new classified refusal,
+  and the only one that carries a delay. Every other refusal is a decision that waiting
+  will not change, and offering a delay for one of those invites a retry loop against a
+  permanent no. The transport maps it to `429` with `Retry-After` computed from the
+  limiter's own arithmetic, so a client that honours it is admitted next time.
+- `-issuance-record`, required with `-backend adcs` — grouped with the adcs flags
+  because that is the only backend that can issue today, but the rule is about
+  capability: a broker that can mint AD credentials must keep an account of the ones it
+  minted. The file is opened at startup, so a broker that cannot write its record fails
+  to start rather than discovering it while refusing a caller that did nothing wrong.
+- `-rate-per-caller` (0.1/s), `-burst-per-caller` (5), `-rate-global` (2/s),
+  `-burst-global` (20), `-rate-limit-idle`. Deliberately low: issuance is a rare event in
+  the life of a workload, so a caller asking more often than this is retrying rather than
+  working. Setting either bound of a limit to zero disables it and says so at startup —
+  a disabled limit is a deployment decision, not something to infer from a missing line.
+
+### Changed
+
+- **`broker.Config.Record` is required.** It is not defaulted to a discarding recorder:
+  a broker keeping no account of what it issued cannot revoke it, and that has to be
+  chosen rather than inherited from a zero value. `record.Discard` is the explicit opt
+  out, which is what a backend that cannot issue uses.
+- **A credential that cannot be recorded is not returned.** By that point the
+  certificate exists and nothing can take that back, but the two outcomes are not
+  symmetric: returned, it is in circulation with no record of its serial, so nobody can
+  revoke it or find out it exists; refused, the same certificate exists at the CA and was
+  never delivered, which leaves it inert because the workload never learned it. The log
+  line names the serial, issuer, and fingerprint so an operator can revoke it by hand.
+
+### Added
+
 - **`internal/issuer/adcs` issues.** `Issue` wraps the workload's PKCS#10 — unread and
   unmodified — in a CMC that names the mapped AD account and is signed by an enrollment
   agent credential, POSTs it to CES, and returns the certificate ADCS issues for that

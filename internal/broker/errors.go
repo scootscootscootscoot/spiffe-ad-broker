@@ -1,6 +1,9 @@
 package broker
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Reason classifies a refusal.
 //
@@ -36,6 +39,14 @@ const (
 	// the credential by some other route.
 	ReasonNotImplemented Reason = "not_implemented"
 
+	// ReasonRateLimited: the caller is known, mapped, and would otherwise
+	// have been issued a credential — it simply asked too often, or the
+	// broker's aggregate draw on the CA is already at its cap.
+	//
+	// It is the one refusal that says "try again later" and means it, so it
+	// is the one refusal that carries a RetryAfter.
+	ReasonRateLimited Reason = "rate_limited"
+
 	// ReasonInternal: the broker failed for a reason the caller cannot act on.
 	ReasonInternal Reason = "internal"
 )
@@ -50,6 +61,12 @@ const (
 type Error struct {
 	Reason  Reason
 	Message string
+
+	// RetryAfter is how long the caller should wait before trying again. It
+	// is set only for ReasonRateLimited; every other refusal is a decision
+	// that waiting will not change, and offering a delay for one of those
+	// would invite a retry loop against a permanent no.
+	RetryAfter time.Duration
 
 	cause error
 }
@@ -68,4 +85,9 @@ func (e *Error) Unwrap() error { return e.cause }
 // refuse builds an Error. cause may be nil.
 func refuse(reason Reason, cause error, message string) *Error {
 	return &Error{Reason: reason, Message: message, cause: cause}
+}
+
+// refuseRetry builds a ReasonRateLimited Error carrying a retry delay.
+func refuseRetry(message string, retryAfter time.Duration) *Error {
+	return &Error{Reason: ReasonRateLimited, Message: message, RetryAfter: retryAfter}
 }

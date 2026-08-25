@@ -25,7 +25,9 @@
 //
 // Every refusal is {"error": {"reason": ..., "message": ...}} with reason
 // drawn from the broker's taxonomy, so a client branches on a stable token
-// rather than parsing prose.
+// rather than parsing prose. A rate_limited refusal is a 429 and additionally
+// carries Retry-After, computed from the limiter rather than guessed, so a
+// client that honours it succeeds on its next attempt.
 package httpapi
 
 import (
@@ -33,8 +35,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
+	"strconv"
 
 	"github.com/scootscootscootscoot/spiffe-ad-broker/internal/broker"
 )
@@ -128,6 +132,12 @@ func (s *Server) handleIssue(w http.ResponseWriter, r *http.Request) {
 		// the point the decision was made. Translate, do not re-report.
 		var bErr *broker.Error
 		if errors.As(err, &bErr) {
+			// Retry-After is set from the limiter's own arithmetic rather
+			// than a constant, so a client that honours it is admitted on its
+			// next attempt instead of being refused again.
+			if bErr.RetryAfter > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(bErr.RetryAfter.Seconds()))))
+			}
 			writeError(w, s.log, statusFor(bErr.Reason), bErr.Reason, bErr.Message)
 			return
 		}
@@ -213,6 +223,8 @@ func statusFor(reason broker.Reason) int {
 		return http.StatusForbidden
 	case broker.ReasonNotImplemented:
 		return http.StatusNotImplemented
+	case broker.ReasonRateLimited:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}
