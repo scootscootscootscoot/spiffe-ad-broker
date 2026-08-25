@@ -67,7 +67,7 @@ The CA's own view confirms what this costs and why the check is not optional:
 | 28 | `EnrollmentAgent` | Issued — the agent credential |
 | 29 | `User` | Issued — the CES client credential |
 | 30 | `WorkloadPKINIT` | Issued — **delivered** |
-| 31 | `WorkloadPKINIT` | Issued — **refused by the broker, never delivered** |
+| 31 | `WorkloadPKINIT` | Issued — **refused by the broker, never delivered**; revoked afterwards |
 
 Request 31 exists at the CA. Nothing could have prevented that: by the time the SID is
 readable the certificate has already been issued. What the check prevents is *delivery*,
@@ -75,12 +75,28 @@ which is what makes it inert — the workload holds the private key but never le
 certificate. This is the same asymmetry the issuance record relies on, and it is the
 honest limit of the guard: it cannot un-issue, only refuse to hand over.
 
-**Lab hygiene:** request 31 should be revoked. It was left in place rather than revoked
-unilaterally, since revocation is irreversible:
+**Request 31 was revoked** (2026-08-25), reason 5, *Cessation of Operation* — the honest
+code for a certificate that was never put into operation. Revoked by serial rather than
+by request id, after cross-checking the serial against the delivered certificate's own
+entry in the issuance record, so there was no way to revoke the wrong one:
 
 ```powershell
-certutil -config 'dc01.pkinitlab.internal\PKINIT Lab Issuing CA' -revoke 31
+certutil -config 'dc01.pkinitlab.internal\PKINIT Lab Issuing CA' \
+         -revoke 5e0000001f92db6f19640de2ba00000000001f 5
+certutil -config 'dc01.pkinitlab.internal\PKINIT Lab Issuing CA' -crl
 ```
+
+Afterwards request 30 is still `Issued` and request 31 is `Revoked` (disposition 0x15),
+and the freshly published CRL carries exactly one entry — request 31's serial, not
+request 30's.
+
+That is worth more than tidiness: it is the **revocation path proven to work against this
+CA**, which is the missing half of "revocation on de-mapping". The issuance record
+supplies the issuer and serial; `certutil -revoke` plus a CRL publish is what consumes
+them. What is still missing is a *programmatic* route — the CES/WSTEP endpoint the broker
+speaks has no revoke operation, so an automated de-mapping would need ICertAdmin over
+DCOM or something equivalent, which is exactly the dependency the transport was chosen to
+avoid.
 
 ## The two AD-facing credentials are genuinely not interchangeable
 
