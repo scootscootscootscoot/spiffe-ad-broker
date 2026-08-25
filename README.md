@@ -9,9 +9,12 @@ services as a real AD account — without the workload holding a long-lived AD s
 without a per-issuance `altSecurityIdentities` write.
 
 > **Status: early, but it issues.** The `adcs` backend obtains a real certificate for the
-> mapped AD account from a live ADCS CA — proven end to end against Windows Server 2025 —
-> and refuses anything that comes back naming a different account. `subordinate` is still
-> a stub that refuses. Nothing here has been run outside a lab.
+> mapped AD account from a live ADCS CA, and refuses anything that comes back naming a
+> different account. Proven end to end **through the server binary** against Windows
+> Server 2025 — a workload authenticating with its SVID over mutual TLS gets back a
+> certificate carrying the target account's UPN and AD SID, bound to a key the broker
+> never saw. The refusal path was exercised too, not just the happy one.
+> `subordinate` is still a stub that refuses. Nothing here has been run outside a lab.
 
 ## It is not a SPIRE plugin
 

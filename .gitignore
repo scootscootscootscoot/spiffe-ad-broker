@@ -21,3 +21,8 @@ lab-evidence/
 
 # Built binary
 /spiffe-ad-broker
+
+# Claude Code session checkpoints. A tooling artifact of whoever happened to be
+# working here — a session id and a rollback pointer, useful on this machine and
+# meaningless to anyone reading the repository.
+.claude/RESUME.md
