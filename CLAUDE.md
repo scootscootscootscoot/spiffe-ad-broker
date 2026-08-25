@@ -67,12 +67,18 @@ and revocation infrastructure — are outside any composer's reach. The composer
   name constraints do not govern the SID extension. Keeping an issuing CA
   single-purpose and small is the only thing bounding a compromise.
 
-**Repo hygiene (pre-public checklist lives here):**
-- Repo is **private until the owner completes an employment-IP review**. Do not make it
-  public, and do not push content anywhere else.
+**Repo hygiene:**
+- Repo is **public** as of 2026-08-25, after the employment-IP review completed. The
+  rules below are therefore no longer a pre-publication checklist — they are live
+  constraints on every commit, and a mistake is immediately public.
 - No work artifacts: no internal doc names/paths/links, no employer name, no real AD
   exports, SIDs from real forests, production certs, or private keys. Fixtures are
   synthetic or sanitized.
+- The lab forest's SIDs (`pkinitlab.internal`, `…-1103`/`…-1104`) **are** in the tree, in
+  tests, fixtures and findings. That is deliberate and allowed: the forest is synthetic
+  and disposable. They also cannot be scrubbed without destroying the point of the golden
+  tests, which pin real ADCS bytes — changing the SID would mean re-capturing every
+  fixture.
 - Commits: sign-off habit (`git commit -s`, DCO style).
 - Apache-2.0, carried over from the predecessor along with the copied packages.
 
@@ -117,6 +123,7 @@ trade for moving fast. If they start mattering in both places, extract then.
 | 2026-08-24 | **The `adcs` backend issues, by CMC enrol-on-behalf-of.** The workload's PKCS#10 goes verbatim into a CMC naming the mapped account in the `regInfo` control, signed by an enrollment agent credential. ADCS accepts a CMC signed by the agent alone, which is what makes the shape possible at all — the broker never holds the workload's key and so can never produce the second signature `certreq` adds. Pinned byte for byte to a capture. |
 | 2026-08-24 | **The mapping snapshot carries the account *name* as well as the SID** (`ad_account`, optional). An enrollment agent names its target by `DOMAIN\samAccountName`; the SID is what comes back. Resolving one to the other would put a directory lookup on the issuance path and move the decision out of the authoritative snapshot, so both come from the snapshot and neither is derived. `subordinate` needs only the SID; `adcs` refuses without the name. |
 | 2026-08-24 | **The account name's character set is pinned narrowly** — `[A-Za-z0-9._$-]` plus one separator — in both `internal/mapping` and the CMC builder. Only the backslash's escaping (`%5C`) was established by capture; `&`, `=` and `%` are refused because unescaped each could restate the authorization inside the `regInfo` string. Widening it means establishing an escaping, not assuming one. |
+| 2026-08-25 | **Repository made public**, employment-IP review complete. Published after a full-history scan across all commits: no private keys, no credentials, no home paths, no workstation hostname — in the tree or in any blob. The synthetic lab forest's SIDs stay, deliberately; see the hygiene rules. No history rewrite was needed, unlike the predecessor, because nothing sensitive ever landed on `master` — the one Claude Code session checkpoint carrying a working-tree snapshot lives in `refs/claude/`, was verified clean, and is not an ancestor of `master`. |
 | 2026-08-25 | **Two rate limits, taken at different points, because they protect different things.** Per caller, before the CSR is parsed, bounding the CPU one workload can spend on proof-of-possession. Globally, immediately before the backend call, bounding this broker's aggregate draw on a CA the rest of the forest depends on — so a request refused for any other reason, having never reached the CA, does not spend the budget for reaching it. Token buckets, so a fleet restarting together still gets through. Hand-written rather than `golang.org/x/time/rate`: the module's zero dependencies are an auditability property of a credential-minting process. |
 | 2026-08-25 | **Every issued credential is durably recorded before it is returned, and one that cannot be recorded is not returned.** Logs rotate and go with the container; revocation needs an issuer and serial, and the CA is not a searchable index of what this broker asked for. By the time recording fails the certificate exists and that cannot be undone — but returned it is in circulation and unrevocable, whereas refused it was never delivered and the workload never learned it, which leaves it inert. The log names the serial so an operator can revoke it by hand. **Refusals are not recorded**: the record answers "what exists", and a durable line per refused request turns a refused flood into disk exhaustion. |
 | 2026-08-24 | **The `adcs` backend needs two AD-facing credentials and they are not interchangeable.** The enrollment agent certificate carries the Certificate Request Agent application policy and not Client Authentication, so it cannot authenticate the TLS connection to a CES endpoint configured for certificate auth. That is a second certificate, mapping to an AD account — the broker has an AD identity of its own. |
