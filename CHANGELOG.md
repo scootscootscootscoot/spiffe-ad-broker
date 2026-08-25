@@ -53,6 +53,26 @@ release. Nothing has been released yet, so everything sits under Unreleased.
   working. Setting either bound of a limit to zero disables it and says so at startup —
   a disabled limit is a deployment decision, not something to infer from a missing line.
 
+- `docs/findings/2026-08-25-end-to-end-through-the-broker.md` — **the service issues, end
+  to end, through the server binary.** A workload authenticating over mutual TLS with its
+  SVID gets back a certificate for the AD account it is mapped to: subject
+  `CN=PKINIT Test User`, SAN `UPN:pkinittest@pkinitlab.internal`, smartcard-logon EKU, and
+  the AD SID extension naming the SID the mapping asked for — issued by a CA that is in
+  NTAuth and is the leaf's direct issuer. The broker authenticated as `labadm` and the
+  certificate came back for `pkinittest`, which is the enrol-on-behalf-of shape working
+  through the service rather than by hand. The workload's key never left it: the leaf's
+  public key, the CSR's, and the workload key's are byte-identical.
+- The same finding exercises **the read-back guard**, which is the property that actually
+  matters here. Pointed at the right account with a deliberately wrong SID, the broker
+  refuses — and the CA's own log shows why the check cannot be optional: request 31 was
+  **Issued** and then refused delivery. By the time the SID is readable the certificate
+  exists; what the check prevents is delivery, which is what leaves it inert. It cannot
+  un-issue, only refuse to hand over.
+- Also observed rather than reasoned about: **the two AD-facing credentials really are
+  not interchangeable.** Minted from the same CA for the same account, the enrollment
+  agent carries `1.3.6.1.4.1.311.20.2.1` and *nothing else*, while the CES client carries
+  TLS Web Client Authentication. Two certificates, or the backend does not start.
+
 ### Changed
 
 - **`broker.Config.Record` is required.** It is not defaulted to a discarding recorder:
