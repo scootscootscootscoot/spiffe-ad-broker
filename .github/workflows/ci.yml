@@ -1,0 +1,166 @@
+# CI for spiffe-ad-broker.
+#
+# The gates are the ones CLAUDE.md's "Verify" block already requires locally —
+# build, vet, test, gofmt — plus three that only a machine will do reliably:
+# the race detector, a fuzz smoke run over every target's corpus, and a check
+# that the module still has no dependencies.
+#
+# That last one is not tidiness. This process mints credentials that
+# authenticate as Active Directory accounts, and the auditability of a
+# zero-dependency module is a stated security property of the design. A
+# dependency arriving unnoticed is the failure this catches.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned to match the toolchain the project develops against. A version
+  # skew here would let a build pass CI that does not build locally.
+  GO_VERSION: "1.26.5"
+
+jobs:
+  verify:
+    name: build, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # -count=1 defeats the test cache: a cached pass tells us nothing about
+      # this commit.
+      - name: go test (race)
+        run: go test -race -count=1 ./...
+
+  dependencies:
+    name: no dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # Two independent checks, because either alone can be satisfied while
+      # the property is broken: go.mod could carry a requirement nothing
+      # imports, and an import could be vendored without a requirement.
+      - name: go.mod declares no requirements
+        run: |
+          if grep -qE '^\s*(require|replace)\b' go.mod; then
+            echo "go.mod has grown a requirement; the zero-dependency property is a stated" >&2
+            echo "security property of this design — see CLAUDE.md before relaxing it." >&2
+            grep -nE '^\s*(require|replace)\b' go.mod >&2
+            exit 1
+          fi
+          if [ -f go.sum ]; then
+            echo "go.sum exists, so something outside the standard library is in the build." >&2
+            exit 1
+          fi
+
+      - name: every dependency is standard library
+        run: |
+          # A standard-library import path has no dot in its first element, so
+          # anything with one is either this module or something external.
+          # -test includes test-only imports, which reach the same go.sum.
+          mod="$(go list -m)"
+          nonstd="$(go list -deps -test ./... \
+            | grep -vE "^${mod}(/|$)" \
+            | grep -E '^[^/]*\.' || true)"
+          if [ -n "$nonstd" ]; then
+            echo "non-standard-library packages are in the build:" >&2
+            echo "$nonstd" >&2
+            exit 1
+          fi
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # With no dependencies this is effectively a check on the Go standard
+      # library, which is exactly the supply chain this project still has.
+      - name: govulncheck
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./internal/mapping
+            target: FuzzValidateSPIFFEID
+          - package: ./internal/mapping
+            target: FuzzValidateSIDString
+          - package: ./internal/mapping
+            target: FuzzParse
+          - package: ./internal/encoding
+            target: FuzzCRLDistributionPoints
+          - package: ./internal/encoding
+            target: FuzzMarshalSID
+          - package: ./internal/encoding
+            target: FuzzUnmarshalSID
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      # A short run per target. This is a smoke test, not a fuzzing campaign:
+      # the committed seed corpus is what pins the known cases, and a minute
+      # of new inputs per push is what catches a regression that widened an
+      # accepting parser. Real campaigns are run by hand and their findings
+      # are committed as seeds.
+      - name: ${{ matrix.target }}
+        run: |
+          go test ${{ matrix.package }} \
+            -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 60s
+
+      # A crasher is written under testdata/fuzz. Keep it: it is the
+      # reproducer, and it is the seed that must go into the corpus.
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: |
+            **/testdata/fuzz/**
+          if-no-files-found: ignore

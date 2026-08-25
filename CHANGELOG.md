@@ -39,6 +39,14 @@ release. Nothing has been released yet, so everything sits under Unreleased.
   capability: a broker that can mint AD credentials must keep an account of the ones it
   minted. The file is opened at startup, so a broker that cannot write its record fails
   to start rather than discovering it while refusing a caller that did nothing wrong.
+- **CI** (`.github/workflows/ci.yml`) — gofmt, build, vet, `go test -race -count=1`, a
+  60-second fuzz smoke run per target with any crasher uploaded as an artifact, and
+  govulncheck. Plus a gate with no equivalent in the local Verify block: **the module
+  must still have no dependencies.** That is not tidiness — the auditability of a
+  zero-dependency module is a stated security property of a process that mints
+  credentials authenticating as AD accounts, and a dependency arriving unnoticed is the
+  failure this catches. Checked two independent ways, because either alone can pass
+  while the property is broken.
 - `-rate-per-caller` (0.1/s), `-burst-per-caller` (5), `-rate-global` (2/s),
   `-burst-global` (20), `-rate-limit-idle`. Deliberately low: issuance is a rare event in
   the life of a workload, so a caller asking more often than this is retrying rather than
